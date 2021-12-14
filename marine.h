@@ -3,9 +3,10 @@
 
 #define WIRESHARK_MARINE_H
 
-#include <glib.h>
+//#include <glib.h>
 #define ARRAY_SIZE(arr)     (sizeof(arr) / sizeof((arr)[0]))
 
+typedef unsigned int guint32;
 typedef struct {
     char **output;
     unsigned int len;
@@ -20,6 +21,35 @@ void marine_free_err_msg(char *ptr);
 void marine_free(marine_result *ptr);
 void marine_report_fields(void);
 void destroy_marine(void);
+
+struct storm_packet_layer {
+    struct storm_packet_layer *next;
+    struct storm_packet_layer *prev;
+
+    struct storm_packet_layer *first_child;
+    struct storm_packet_layer *last_child;
+
+    char *name;
+
+    char *data;
+    int len;
+};
+
+struct storm_packet {
+    unsigned char *source_packet;
+    unsigned int source_packet_length;
+
+    struct storm_packet_layer *layer_tree;
+};
+
+int storm_init(void);
+
+struct storm_packet *storm_dissect_packet(unsigned char *packet, unsigned int len, int wtap_encap);
+
+int storm_destroy(void);
+
+void storm_packet_layer_print(struct storm_packet_layer *layer);
+
 
 extern const unsigned int ETHERNET_ENCAP;
 extern const unsigned int WIFI_ENCAP;

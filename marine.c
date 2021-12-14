@@ -17,6 +17,7 @@
 #include "marine.h"
 #include "config.h"
 #include <glib.h>
+#include <stdio.h>
 #include <limits.h>
 #include <locale.h>
 #include <stdlib.h>
@@ -143,6 +144,11 @@ typedef struct {
     int wtap_encap;
 } packet_filter;
 
+struct storm_extract_proto_tree_data {
+    char *source_buffer;
+    struct storm_packet_layer *layer;
+};
+
 
 static GHashTable *packet_filters;
 static int *packet_filter_keys[4096];
@@ -261,6 +267,74 @@ static void proto_tree_get_node_field_values(proto_node *node, gpointer data) {
     if (node->first_child != NULL) {
         proto_tree_children_foreach(node, proto_tree_get_node_field_values,
                                     call_data);
+    }
+}
+
+static void storm_packet_layer_print_inner(struct storm_packet_layer *layer, int depth) {
+    if (NULL == layer) return;
+    for (int i = 0; i < depth; i++) printf("\t");
+    if (NULL != layer->name) {
+        printf("%s %d ", layer->name, layer->len);
+        if (0 != layer->len) {
+            for (int i = 0; i < layer->len; i++) {
+                printf("%x", layer->data[i]);
+            }
+        }
+        printf("\n");
+    }
+
+    if (NULL != layer->first_child) storm_packet_layer_print_inner(layer->first_child, depth + 1);
+    if (NULL != layer->next) storm_packet_layer_print_inner(layer->next, depth);
+}
+
+WS_DLL_PUBLIC void
+storm_packet_layer_print(struct storm_packet_layer *layer) {
+    storm_packet_layer_print_inner(layer, 0);
+}
+
+static struct storm_packet_layer *
+storm_packet_layer_make(char *data, int len) {
+    struct storm_packet_layer *layer = (struct storm_packet_layer *) malloc(sizeof (struct storm_packet_layer));
+    layer->next = NULL;
+    layer->prev = NULL;
+
+    layer->first_child = NULL;
+    layer->last_child = NULL;
+    layer->data = data;
+    layer->len = len;
+    layer->name = "root";
+    return layer;
+}
+
+static void
+storm_packet_layer_add_child(struct storm_packet_layer *parent, struct storm_packet_layer *child) {
+    if (NULL == parent->first_child) {
+        parent->first_child = child;
+        parent->last_child = child;
+    } else {
+        child->prev = parent->last_child;
+        parent->last_child->next = child;
+        parent->last_child = child;
+    }
+}
+
+static void
+proto_tree_load_onto_packet(proto_node *node, gpointer data) {
+    struct storm_extract_proto_tree_data *proto_data = (struct  storm_extract_proto_tree_data *) data;
+    struct storm_packet_layer *parent = proto_data->layer;
+    struct storm_packet_layer *layer = storm_packet_layer_make(proto_data->source_buffer + node->finfo->start, node->finfo->length);
+
+    layer->name = (char *) malloc(strlen(node->finfo->hfinfo->abbrev));
+    strcpy(layer->name, node->finfo->hfinfo->abbrev);
+
+    storm_packet_layer_add_child(parent, layer);
+
+    if (NULL != node->first_child) {
+        struct storm_extract_proto_tree_data child_proto_data = {
+                .layer = layer,
+                .source_buffer = proto_data->source_buffer
+        };
+        proto_tree_children_foreach(node, proto_tree_load_onto_packet, &child_proto_data);
     }
 }
 
@@ -913,6 +987,98 @@ WS_DLL_PUBLIC int init_marine(void) {
     return _init_marine();
 }
 
+WS_DLL_PUBLIC int
+storm_init(void) {
+    if (!can_init_marine) {
+        return MARINE_ALREADY_INITIALIZED_ERROR_CODE;
+    }
+
+    can_init_marine = FALSE;
+    return _init_marine();
+}
+
+
+WS_DLL_PUBLIC struct storm_packet *
+storm_dissect_packet(unsigned char *packet, unsigned int len, int wtap_encap) {
+    struct storm_packet *dst = (struct storm_packet *) malloc(sizeof(struct storm_packet));
+    dst->layer_tree = storm_packet_layer_make(packet, len);
+    capture_file *cf = &cfile;
+
+    dst->source_packet = packet;
+    dst->source_packet_length = len;
+
+
+    wtap_rec rec;
+    Buffer buf;
+    epan_dissect_t *edt = NULL;
+    wtap_rec_init(&rec);
+    ws_buffer_init(&buf, len);
+
+    // Copy the data into an epan buffer
+    memcpy(ws_buffer_start_ptr(&buf), packet, len);
+
+    // Fake the rec structure for internal dissection
+    (&rec)->rec_type = REC_TYPE_PACKET;
+    (&rec)->presence_flags = WTAP_HAS_CAP_LEN;
+    (&rec)->rec_header.packet_header.caplen = len;
+    (&rec)->rec_header.packet_header.len = len;
+    (&rec)->rec_header.packet_header.pkt_encap = wtap_encap;
+    (&rec)->rec_header.ft_specific_header.record_len = len;
+    (&rec)->rec_header.ft_specific_header.record_type = len;
+    (&rec)->rec_header.syscall_header.record_type = len;
+    (&rec)->rec_header.syscall_header.byte_order = len;
+
+
+    /* The protocol tree will be "visible", i.e., printed, only if we're
+       printing packet details, which is true if we're printing stuff
+       ("print_packet_info" is true) and we're in verbose mode
+       ("packet_details" is true). */
+    edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+
+    /*
+     * Force synchronous resolution of IP addresses; we're doing only
+     * one pass, so we can't do it in the background and fix up past
+     * dissections.
+     */
+    //set_resolution_synchrony(TRUE); // TODO can we remove c-ares?
+
+    reset_epan_mem(cf, edt, 1, 1);
+
+//    int passed = marine_process_packet(cf, edt, filter, &buf, &rec, len, output);
+
+    frame_data fdata;
+    column_info *cinfo;
+    cf->count++;
+    marine_frame_data_init(&fdata, cf->count, len);
+    if (edt) {
+        /* This is the first and only pass, so prime the epan_dissect_t
+           with the hfids postdissectors want on the first pass. */
+        prime_epan_dissect_with_postdissector_wanted_hfids(edt);
+
+        col_custom_prime_edt(edt, &cf->cinfo);
+        cinfo = NULL;
+
+        //frame_data_set_before_dissect(&fdata, &cf->elapsed_time,
+        //                              &cf->provider.ref, cf->provider.prev_dis);
+        if (cf->provider.ref == &fdata) {
+            ref_frame = fdata;
+            cf->provider.ref = &ref_frame;
+        }
+
+        epan_dissect_run_with_taps(edt, cf->cd_t, &rec,
+                                   frame_tvbuff_new_buffer(&cf->provider, &fdata, &buf),
+                                   &fdata, cinfo);
+        struct storm_extract_proto_tree_data extract_proto_data = {
+                .source_buffer = dst->source_packet,
+                .layer = dst->layer_tree
+        };
+        proto_tree_children_foreach(edt->tree, proto_tree_load_onto_packet, &extract_proto_data);
+    }
+
+
+    return dst;
+}
+
 WS_DLL_PUBLIC void destroy_marine(void) {
     for (unsigned int i = 0; i < g_hash_table_size(packet_filters); i++) {
         int *key = packet_filter_keys[i];
@@ -949,6 +1115,21 @@ WS_DLL_PUBLIC void destroy_marine(void) {
     wtap_cleanup();
     free_progdirs();
     g_hash_table_destroy(packet_filters);
+}
+
+WS_DLL_PUBLIC int
+storm_destroy(void) {
+    reset_tap_listeners();
+    funnel_dump_all_text_windows();
+    epan_free(cfile.epan);
+    epan_cleanup();
+    extcap_cleanup();
+
+    col_cleanup(&cfile.cinfo);
+    free_filter_lists();
+    wtap_cleanup();
+    free_progdirs();
+    return 0;
 }
 
 WS_DLL_PUBLIC void marine_free(marine_result *ptr) {
