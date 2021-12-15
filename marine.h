@@ -22,12 +22,12 @@ void marine_free(marine_result *ptr);
 void marine_report_fields(void);
 void destroy_marine(void);
 
-struct storm_packet_layer {
-    struct storm_packet_layer *next;
-    struct storm_packet_layer *prev;
+struct storm_packet_proto_node {
+    struct storm_packet_proto_node *next;
+    struct storm_packet_proto_node *prev;
 
-    struct storm_packet_layer *first_child;
-    struct storm_packet_layer *last_child;
+    struct storm_packet_proto_node *first_child;
+    struct storm_packet_proto_node *last_child;
 
     char *name;
 
@@ -39,7 +39,7 @@ struct storm_packet {
     unsigned char *source_packet;
     unsigned int source_packet_length;
 
-    struct storm_packet_layer *layer_tree;
+    struct storm_packet_proto_node *layer_tree;
 };
 
 int storm_init(void);
@@ -48,7 +48,7 @@ struct storm_packet *storm_dissect_packet(unsigned char *packet, unsigned int le
 
 int storm_destroy(void);
 
-void storm_packet_layer_print(struct storm_packet_layer *layer);
+void storm_packet_proto_node_print(struct storm_packet_proto_node *layer);
 
 
 extern const unsigned int ETHERNET_ENCAP;

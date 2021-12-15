@@ -146,7 +146,7 @@ typedef struct {
 
 struct storm_extract_proto_tree_data {
     char *source_buffer;
-    struct storm_packet_layer *layer;
+    struct storm_packet_proto_node *proto_node;
 };
 
 
@@ -270,44 +270,45 @@ static void proto_tree_get_node_field_values(proto_node *node, gpointer data) {
     }
 }
 
-static void storm_packet_layer_print_inner(struct storm_packet_layer *layer, int depth) {
-    if (NULL == layer) return;
+static void storm_packet_proto_node_print_inner(struct storm_packet_proto_node *node, int depth) {
+    if (NULL == node) return;
+
     for (int i = 0; i < depth; i++) printf("\t");
-    if (NULL != layer->name) {
-        printf("%s %d ", layer->name, layer->len);
-        if (0 != layer->len) {
-            for (int i = 0; i < layer->len; i++) {
-                printf("%x", layer->data[i]);
+    if (NULL != node->name) {
+        printf("%s %d ", node->name, node->len);
+        if (0 != node->len) {
+            for (int i = 0; i < node->len; i++) {
+                printf("%02x", node->data[i]);
             }
         }
         printf("\n");
     }
 
-    if (NULL != layer->first_child) storm_packet_layer_print_inner(layer->first_child, depth + 1);
-    if (NULL != layer->next) storm_packet_layer_print_inner(layer->next, depth);
+    if (NULL != node->first_child) storm_packet_proto_node_print_inner(node->first_child, depth + 1);
+    if (NULL != node->next) storm_packet_proto_node_print_inner(node->next, depth);
 }
 
 WS_DLL_PUBLIC void
-storm_packet_layer_print(struct storm_packet_layer *layer) {
-    storm_packet_layer_print_inner(layer, 0);
+storm_packet_proto_node_print(struct storm_packet_proto_node *layer) {
+    storm_packet_proto_node_print_inner(layer, 0);
 }
 
-static struct storm_packet_layer *
-storm_packet_layer_make(char *data, int len) {
-    struct storm_packet_layer *layer = (struct storm_packet_layer *) malloc(sizeof (struct storm_packet_layer));
-    layer->next = NULL;
-    layer->prev = NULL;
+static struct storm_packet_proto_node *
+storm_packet_proto_node_make(char *data, int len) {
+    struct storm_packet_proto_node *node = (struct storm_packet_proto_node *) malloc(sizeof (struct storm_packet_proto_node));
+    node->next = NULL;
+    node->prev = NULL;
 
-    layer->first_child = NULL;
-    layer->last_child = NULL;
-    layer->data = data;
-    layer->len = len;
-    layer->name = "root";
-    return layer;
+    node->first_child = NULL;
+    node->last_child = NULL;
+    node->data = data;
+    node->len = len;
+    node->name = "root";
+    return node;
 }
 
 static void
-storm_packet_layer_add_child(struct storm_packet_layer *parent, struct storm_packet_layer *child) {
+storm_packet_proto_node_add_child(struct storm_packet_proto_node *parent, struct storm_packet_proto_node *child) {
     if (NULL == parent->first_child) {
         parent->first_child = child;
         parent->last_child = child;
@@ -321,17 +322,18 @@ storm_packet_layer_add_child(struct storm_packet_layer *parent, struct storm_pac
 static void
 proto_tree_load_onto_packet(proto_node *node, gpointer data) {
     struct storm_extract_proto_tree_data *proto_data = (struct  storm_extract_proto_tree_data *) data;
-    struct storm_packet_layer *parent = proto_data->layer;
-    struct storm_packet_layer *layer = storm_packet_layer_make(proto_data->source_buffer + node->finfo->start, node->finfo->length);
+    struct storm_packet_proto_node *parent = proto_data->proto_node;
+    struct storm_packet_proto_node *storm_proto_node = storm_packet_proto_node_make(
+            proto_data->source_buffer + node->finfo->start, node->finfo->length);
 
-    layer->name = (char *) malloc(strlen(node->finfo->hfinfo->abbrev));
-    strcpy(layer->name, node->finfo->hfinfo->abbrev);
+    storm_proto_node->name = (char *) malloc(strlen(node->finfo->hfinfo->abbrev));
+    strcpy(storm_proto_node->name, node->finfo->hfinfo->abbrev);
 
-    storm_packet_layer_add_child(parent, layer);
+    storm_packet_proto_node_add_child(parent, storm_proto_node);
 
     if (NULL != node->first_child) {
         struct storm_extract_proto_tree_data child_proto_data = {
-                .layer = layer,
+                .proto_node = storm_proto_node,
                 .source_buffer = proto_data->source_buffer
         };
         proto_tree_children_foreach(node, proto_tree_load_onto_packet, &child_proto_data);
@@ -1001,7 +1003,7 @@ storm_init(void) {
 WS_DLL_PUBLIC struct storm_packet *
 storm_dissect_packet(unsigned char *packet, unsigned int len, int wtap_encap) {
     struct storm_packet *dst = (struct storm_packet *) malloc(sizeof(struct storm_packet));
-    dst->layer_tree = storm_packet_layer_make(packet, len);
+    dst->layer_tree = storm_packet_proto_node_make(packet, len);
     capture_file *cf = &cfile;
 
     dst->source_packet = packet;
@@ -1070,7 +1072,7 @@ storm_dissect_packet(unsigned char *packet, unsigned int len, int wtap_encap) {
                                    &fdata, cinfo);
         struct storm_extract_proto_tree_data extract_proto_data = {
                 .source_buffer = dst->source_packet,
-                .layer = dst->layer_tree
+                .proto_node = dst->layer_tree
         };
         proto_tree_children_foreach(edt->tree, proto_tree_load_onto_packet, &extract_proto_data);
     }
