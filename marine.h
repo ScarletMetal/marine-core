@@ -31,7 +31,7 @@ struct storm_packet_proto_node {
 
     char *name;
 
-    char *data;
+    unsigned char *data;
     int len;
 };
 
