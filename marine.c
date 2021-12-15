@@ -999,9 +999,64 @@ storm_init(void) {
     return _init_marine();
 }
 
+static void marine_setup_wtap_rec(wtap_rec *rec, int len, int wtap_encap) {
+    // Fake the rec structure for internal dissection
+    rec->rec_type = REC_TYPE_PACKET;
+    rec->presence_flags = WTAP_HAS_CAP_LEN;
+    rec->rec_header.packet_header.caplen = len;
+    rec->rec_header.packet_header.len = len;
+    rec->rec_header.packet_header.pkt_encap = wtap_encap;
+    rec->rec_header.ft_specific_header.record_len = len;
+    rec->rec_header.ft_specific_header.record_type = len;
+    rec->rec_header.syscall_header.record_type = len;
+    rec->rec_header.syscall_header.byte_order = len;
+}
+
+static epan_dissect_t *
+marine_epan_dissect_new(capture_file *cf) {
+    /* The protocol tree will be "visible", i.e., printed, only if we're
+       printing packet details, which is true if we're printing stuff
+       ("print_packet_info" is true) and we're in verbose mode
+       ("packet_details" is true). */
+    epan_dissect_t *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    reset_epan_mem(cf, edt, 1, 1);
+    return edt;
+}
+
+static void
+marine_epan_dissect_run(capture_file *cf, epan_dissect_t *edt, wtap_rec *rec, Buffer *buf, int len) {
+    frame_data fdata;
+    column_info *cinfo;
+
+    cf->count++;
+    marine_frame_data_init(&fdata, cf->count, len);
+
+    prime_epan_dissect_with_postdissector_wanted_hfids(edt);
+
+    col_custom_prime_edt(edt, &cf->cinfo);
+    cinfo = NULL;
+
+    if (cf->provider.ref == &fdata) {
+        ref_frame = fdata;
+        cf->provider.ref = &ref_frame;
+    }
+
+    epan_dissect_run_with_taps(edt,
+                               cf->cd_t,
+                               rec,
+                               frame_tvbuff_new_buffer(&cf->provider, &fdata, buf),
+                               &fdata,
+                               cinfo);
+
+    frame_data_set_after_dissect(&fdata, &cum_bytes);
+    prev_dis_frame = fdata;
+    cf->provider.prev_dis = &prev_dis_frame;
+    frame_data_destroy(&fdata);
+}
+
 
 WS_DLL_PUBLIC struct storm_packet *
-storm_dissect_packet(unsigned char *packet, unsigned int len, int wtap_encap) {
+storm_dissect_packet(unsigned char *packet, int len, int wtap_encap) {
     struct storm_packet *dst = (struct storm_packet *) malloc(sizeof(struct storm_packet));
     dst->layer_tree = storm_packet_proto_node_make(packet, len);
     capture_file *cf = &cfile;
@@ -1016,68 +1071,21 @@ storm_dissect_packet(unsigned char *packet, unsigned int len, int wtap_encap) {
     wtap_rec_init(&rec);
     ws_buffer_init(&buf, len);
 
-    // Copy the data into an epan buffer
     memcpy(ws_buffer_start_ptr(&buf), packet, len);
 
-    // Fake the rec structure for internal dissection
-    (&rec)->rec_type = REC_TYPE_PACKET;
-    (&rec)->presence_flags = WTAP_HAS_CAP_LEN;
-    (&rec)->rec_header.packet_header.caplen = len;
-    (&rec)->rec_header.packet_header.len = len;
-    (&rec)->rec_header.packet_header.pkt_encap = wtap_encap;
-    (&rec)->rec_header.ft_specific_header.record_len = len;
-    (&rec)->rec_header.ft_specific_header.record_type = len;
-    (&rec)->rec_header.syscall_header.record_type = len;
-    (&rec)->rec_header.syscall_header.byte_order = len;
+    marine_setup_wtap_rec(&rec, len, wtap_encap);
 
+    edt = marine_epan_dissect_new(cf);
 
-    /* The protocol tree will be "visible", i.e., printed, only if we're
-       printing packet details, which is true if we're printing stuff
-       ("print_packet_info" is true) and we're in verbose mode
-       ("packet_details" is true). */
-    edt = epan_dissect_new(cf->epan, TRUE, TRUE);
-
-    /*
-     * Force synchronous resolution of IP addresses; we're doing only
-     * one pass, so we can't do it in the background and fix up past
-     * dissections.
-     */
-    //set_resolution_synchrony(TRUE); // TODO can we remove c-ares?
-
-    reset_epan_mem(cf, edt, 1, 1);
-
-//    int passed = marine_process_packet(cf, edt, filter, &buf, &rec, len, output);
-
-    frame_data fdata;
-    column_info *cinfo;
-    cf->count++;
-    marine_frame_data_init(&fdata, cf->count, len);
-    if (edt) {
-        /* This is the first and only pass, so prime the epan_dissect_t
-           with the hfids postdissectors want on the first pass. */
-        prime_epan_dissect_with_postdissector_wanted_hfids(edt);
-
-        col_custom_prime_edt(edt, &cf->cinfo);
-        cinfo = NULL;
-
-        //frame_data_set_before_dissect(&fdata, &cf->elapsed_time,
-        //                              &cf->provider.ref, cf->provider.prev_dis);
-        if (cf->provider.ref == &fdata) {
-            ref_frame = fdata;
-            cf->provider.ref = &ref_frame;
-        }
-
-        epan_dissect_run_with_taps(edt, cf->cd_t, &rec,
-                                   frame_tvbuff_new_buffer(&cf->provider, &fdata, &buf),
-                                   &fdata, cinfo);
-        struct storm_extract_proto_tree_data extract_proto_data = {
+    marine_epan_dissect_run(cf, edt, &rec, &buf, len);
+    struct storm_extract_proto_tree_data extract_proto_data = {
                 .source_buffer = dst->source_packet,
                 .proto_node = dst->layer_tree
-        };
-        proto_tree_children_foreach(edt->tree, proto_tree_load_onto_packet, &extract_proto_data);
-    }
+    };
+    proto_tree_children_foreach(edt->tree, proto_tree_load_onto_packet, &extract_proto_data);
 
-
+    epan_dissect_reset(edt);
+    wtap_rec_cleanup(&rec);
     return dst;
 }
 

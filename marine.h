@@ -44,7 +44,7 @@ struct storm_packet {
 
 int storm_init(void);
 
-struct storm_packet *storm_dissect_packet(unsigned char *packet, unsigned int len, int wtap_encap);
+struct storm_packet *storm_dissect_packet(unsigned char *packet, int len, int wtap_encap);
 
 int storm_destroy(void);
 
